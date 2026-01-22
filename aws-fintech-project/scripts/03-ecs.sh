@@ -1,7 +1,14 @@
 #!/bin/bash
 # 03-ecs.sh
-# Task 3.1: ECS Cluster Setup
-# Task 3.2: Auto Scaling Configuration
+# Production-ready ECS setup
+# Idempotent: Checks for existing resources before creating.
+
+set -e
+
+PROJECT="fintech"
+ENV="production"
+AWS_REGION="us-east-1"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 # Load state
 if [ -f .env_state ]; then
@@ -11,138 +18,126 @@ else
   exit 1
 fi
 
-echo "Starting ECS Setup..."
+get_security_group_id() {
+  aws ec2 describe-security-groups --filters "Name=group-name,Values=$1" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text | grep -v "None" || echo ""
+}
 
-# Get Account ID
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "--- Starting ECS Setup ---"
 
-# Create ECR Repository
-aws ecr create-repository \
-  --repository-name fintech-api \
-  --image-scanning-configuration scanOnPush=true \
-  --encryption-configuration encryptionType=AES256 \
-  --tags key=Environment,value=Production key=Project,value=FinTech
+# 1. ECR
+REPO_NAME="${PROJECT}-api"
+REPO_URI=$(aws ecr describe-repositories --repository-names $REPO_NAME --query "repositories[0].repositoryUri" --output text 2>/dev/null || echo "")
 
-ECR_REPO=$(aws ecr describe-repositories --repository-names fintech-api --query 'repositories[0].repositoryUri' --output text)
+if [ -z "$REPO_URI" ]; then
+    echo "Creating ECR Repository..."
+    REPO_URI=$(aws ecr create-repository \
+      --repository-name $REPO_NAME \
+      --image-scanning-configuration scanOnPush=true \
+      --encryption-configuration encryptionType=AES256 \
+      --tags "Key=Project,Value=$PROJECT" "Key=Environment,Value=$ENV" \
+      --query 'repository.repositoryUri' --output text)
+else
+    echo "ECR Repo exists: $REPO_URI"
+fi
 
-# Create CloudWatch Log Group
-aws logs create-log-group --log-group-name /ecs/fintech-api
+# 2. Cluster
+CLUSTER_NAME="${PROJECT}-cluster"
+CLUSTER_ARN=$(aws ecs describe-clusters --clusters $CLUSTER_NAME --query "clusters[0].clusterArn" --output text | grep -v "MISSING" || echo "")
 
-# Create ECS Cluster
-aws ecs create-cluster \
-  --cluster-name fintech-cluster \
-  --capacity-providers FARGATE FARGATE_SPOT \
-  --default-capacity-provider-strategy \
-    capacityProvider=FARGATE_SPOT,weight=2 \
-    capacityProvider=FARGATE,weight=1 \
-  --tags key=Environment,value=Production key=Project,value=FinTech
+if [ -z "$CLUSTER_ARN" ]; then
+    echo "Creating ECS Cluster..."
+    CLUSTER_ARN=$(aws ecs create-cluster \
+      --cluster-name $CLUSTER_NAME \
+      --capacity-providers FARGATE FARGATE_SPOT \
+      --default-capacity-provider-strategy capacityProvider=FARGATE_SPOT,weight=2 capacityProvider=FARGATE,weight=1 \
+      --tags "Key=Project,Value=$PROJECT" "Key=Environment,Value=$ENV" \
+      --query 'cluster.clusterArn' --output text)
+else
+    echo "ECS Cluster exists: $CLUSTER_NAME"
+fi
 
-# Create Task Execution Role
-aws iam create-role \
-  --role-name ecsTaskExecutionRole \
-  --assume-role-policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Principal": {"Service": "ecs-tasks.amazonaws.com"},
-      "Action": "sts:AssumeRole"
-    }]
-  }'
+# 3. Security Groups
+# ALB SG
+ALB_SG_NAME="${PROJECT}-alb-sg"
+ALB_SG_ID=$(get_security_group_id $ALB_SG_NAME)
+if [ -z "$ALB_SG_ID" ]; then
+    echo "Creating ALB Security Group..."
+    ALB_SG_ID=$(aws ec2 create-security-group --group-name $ALB_SG_NAME --description "ALB Security Group" --vpc-id $VPC_ID --query 'GroupId' --output text)
+    aws ec2 authorize-security-group-ingress --group-id $ALB_SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0
+    aws ec2 authorize-security-group-ingress --group-id $ALB_SG_ID --protocol tcp --port 443 --cidr 0.0.0.0/0
+else
+    echo "ALB SG exists: $ALB_SG_ID"
+fi
 
-aws iam attach-role-policy \
-  --role-name ecsTaskExecutionRole \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+# ECS SG
+ECS_SG_NAME="${PROJECT}-ecs-sg"
+ECS_SG_ID=$(get_security_group_id $ECS_SG_NAME)
+if [ -z "$ECS_SG_ID" ]; then
+    echo "Creating ECS Security Group..."
+    ECS_SG_ID=$(aws ec2 create-security-group --group-name $ECS_SG_NAME --description "ECS Tasks Security Group" --vpc-id $VPC_ID --query 'GroupId' --output text)
+    aws ec2 authorize-security-group-ingress --group-id $ECS_SG_ID --protocol tcp --port 8080 --source-group $ALB_SG_ID
+else
+    echo "ECS SG exists: $ECS_SG_ID"
+fi
 
-# Create Task Role
-aws iam create-role \
-  --role-name ecsTaskRole \
-  --assume-role-policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Principal": {"Service": "ecs-tasks.amazonaws.com"},
-      "Action": "sts:AssumeRole"
-    }]
-  }'
+# 4. Load Balancer
+ALB_NAME="${PROJECT}-alb"
+ALB_ARN=$(aws elbv2 describe-load-balancers --names $ALB_NAME --query "LoadBalancers[0].LoadBalancerArn" --output text 2>/dev/null || echo "")
 
-# Create Security Group for ECS Tasks
-ECS_SG=$(aws ec2 create-security-group \
-  --group-name fintech-ecs-sg \
-  --description "Security group for ECS tasks" \
-  --vpc-id $VPC_ID \
-  --query 'GroupId' --output text)
+if [ -z "$ALB_ARN" ]; then
+    echo "Creating Application Load Balancer..."
+    ALB_ARN=$(aws elbv2 create-load-balancer \
+        --name $ALB_NAME \
+        --subnets $PUBLIC_SUBNET_A $PUBLIC_SUBNET_B \
+        --security-groups $ALB_SG_ID \
+        --scheme internet-facing \
+        --type application \
+        --tags "Key=Project,Value=$PROJECT" "Key=Environment,Value=$ENV" \
+        --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+else
+    echo "ALB exists: $ALB_ARN"
+fi
 
-# Create Application Load Balancer SG
-ALB_SG=$(aws ec2 create-security-group \
-  --group-name fintech-alb-sg \
-  --description "Security group for ALB" \
-  --vpc-id $VPC_ID \
-  --query 'GroupId' --output text)
+# 5. Target Group
+TG_NAME="${PROJECT}-api-tg"
+TG_ARN=$(aws elbv2 describe-target-groups --names $TG_NAME --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || echo "")
 
-# Allow HTTP/HTTPS to ALB
-aws ec2 authorize-security-group-ingress \
-  --group-id $ALB_SG \
-  --protocol tcp \
-  --port 80 \
-  --cidr 0.0.0.0/0
+if [ -z "$TG_ARN" ]; then
+    echo "Creating Target Group..."
+    TG_ARN=$(aws elbv2 create-target-group \
+        --name $TG_NAME \
+        --protocol HTTP \
+        --port 8080 \
+        --vpc-id $VPC_ID \
+        --target-type ip \
+        --health-check-path /health \
+        --query 'TargetGroups[0].TargetGroupArn' --output text)
+else
+    echo "Target Group exists: $TG_ARN"
+fi
 
-aws ec2 authorize-security-group-ingress \
-  --group-id $ALB_SG \
-  --protocol tcp \
-  --port 443 \
-  --cidr 0.0.0.0/0
+# 6. Listener
+LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query "Listeners[?Port==\`80\`].ListenerArn" --output text | grep -v "None" || echo "")
 
-# Allow ALB to ECS
-aws ec2 authorize-security-group-ingress \
-  --group-id $ECS_SG \
-  --protocol tcp \
-  --port 8080 \
-  --source-group $ALB_SG
+if [ -z "$LISTENER_ARN" ]; then
+    echo "Creating Listener (HTTP)..."
+    aws elbv2 create-listener \
+        --load-balancer-arn $ALB_ARN \
+        --protocol HTTP \
+        --port 80 \
+        --default-actions Type=forward,TargetGroupArn=$TG_ARN
+else
+    echo "Listener exists."
+fi
 
-ALB_ARN=$(aws elbv2 create-load-balancer \
-  --name fintech-alb \
-  --subnets $PUBLIC_SUBNET_A $PUBLIC_SUBNET_B \
-  --security-groups $ALB_SG \
-  --scheme internet-facing \
-  --type application \
-  --tags Key=Environment,Value=Production Key=Project,Value=FinTech \
-  --query 'LoadBalancers[0].LoadBalancerArn' --output text)
-
-# Create Target Group
-TARGET_GROUP_ARN=$(aws elbv2 create-target-group \
-  --name fintech-api-tg \
-  --protocol HTTP \
-  --port 8080 \
-  --vpc-id $VPC_ID \
-  --target-type ip \
-  --health-check-path /health \
-  --health-check-interval-seconds 30 \
-  --health-check-timeout-seconds 5 \
-  --healthy-threshold-count 2 \
-  --unhealthy-threshold-count 3 \
-  --query 'TargetGroups[0].TargetGroupArn' --output text)
-
-# Create Listener
-aws elbv2 create-listener \
-  --load-balancer-arn $ALB_ARN \
-  --protocol HTTP \
-  --port 80 \
-  --default-actions Type=forward,TargetGroupArn=$TARGET_GROUP_ARN
-
-# NOTE: Task Definition requires Secrets which are created in 04-data-layer.sh
-# For this script to be fully runnable sequentially, we need the secrets first.
-# However, the user provided order has ECS first.
-# We will create the Task Definition, but it might fail if secrets don't exist yet.
-# To be safe, we'll note this dependency.
-
-echo "ECS Cluster and Networking created."
-echo "Wait for Task 4 (Data Layer) to create Secrets before registering Task Definition if running for real."
-
-# Append ECS vars to state
-cat << EOF >> .env_state
-export ECS_SG=$ECS_SG
-export ACCOUNT_ID=$ACCOUNT_ID
-export ECR_REPO=$ECR_REPO
-export TARGET_GROUP_ARN=$TARGET_GROUP_ARN
+# Save State
+echo "Updating state..."
+cat >> .env_state <<EOF
+export ECR_REPO_URI=$REPO_URI
+export CLUSTER_ARN=$CLUSTER_ARN
+export ECS_SG_ID=$ECS_SG_ID
 export ALB_ARN=$ALB_ARN
+export TARGET_GROUP_ARN=$TG_ARN
 EOF
+
+echo "--- ECS Setup Complete ---"
