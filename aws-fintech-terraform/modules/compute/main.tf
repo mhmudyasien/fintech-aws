@@ -2,9 +2,7 @@ variable "project_name" {}
 variable "environment" {}
 variable "vpc_id" {}
 variable "public_subnets" { type = list(string) }
-variable "private_app_subnets" { type = list(string) }
 variable "region" {}
-variable "ecr_repo_url" { default = "" } # Optional if pre-created
 
 # === Security Groups ===
 
@@ -28,16 +26,25 @@ resource "aws_security_group" "alb" {
   }
 }
 
-resource "aws_security_group" "ecs" {
-  name        = "${var.project_name}-ecs-sg"
-  description = "ECS Task Security Group"
+resource "aws_security_group" "ecs_node" {
+  name        = "${var.project_name}-ecs-node-sg"
+  description = "Security Group for EC2 Nodes"
   vpc_id      = var.vpc_id
 
+  # Allow dynamic ports from ALB
   ingress {
-    from_port       = 8080
-    to_port         = 8080
+    from_port       = 32768
+    to_port         = 65535
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
+  }
+
+  # SSH for debugging (Demo only)
+  ingress {
+      from_port = 22
+      to_port = 22
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -56,6 +63,90 @@ resource "aws_ecr_repository" "api" {
   force_delete         = true
 }
 
+# === ECS Cluster ===
+
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
+}
+
+# === EC2 Launch Template (Free Tier) ===
+
+data "aws_ssm_parameter" "ecs_ami" {
+  name = "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
+}
+
+# IAM Role for EC2 Instance Profile
+resource "aws_iam_role" "ecs_instance_role" {
+  name = "ecsInstanceRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_instance_role_policy" {
+  role       = aws_iam_role.ecs_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+resource "aws_iam_instance_profile" "ecs_instance_profile" {
+  name = "ecsInstanceProfile"
+  role = aws_iam_role.ecs_instance_role.name
+}
+
+resource "aws_launch_template" "ecs" {
+  name_prefix   = "${var.project_name}-ecs-lt"
+  image_id      = data.aws_ssm_parameter.ecs_ami.value
+  instance_type = "t2.micro" # Free Tier
+  
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ecs_instance_profile.name
+  }
+
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.ecs_node.id]
+  }
+
+  user_data = base64encode(<<EOF
+#!/bin/bash
+echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config
+EOF
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "${var.project_name}-ecs-node"
+    }
+  }
+}
+
+# === Auto Scaling Group ===
+
+resource "aws_autoscaling_group" "ecs" {
+  name                = "${var.project_name}-ecs-asg"
+  vpc_zone_identifier = var.public_subnets # Public for internet access (Pull images)
+  launch_template {
+    id      = aws_launch_template.ecs.id
+    version = "$Latest"
+  }
+
+  min_size         = 1
+  max_size         = 1
+  desired_capacity = 1
+
+  tag {
+    key                 = "AmazonECSManaged"
+    value               = true
+    propagate_at_launch = true
+  }
+}
+
 # === Load Balancer ===
 
 resource "aws_lb" "main" {
@@ -68,10 +159,10 @@ resource "aws_lb" "main" {
 
 resource "aws_lb_target_group" "api" {
   name        = "${var.project_name}-api-tg"
-  port        = 8080
+  port        = 80
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
-  target_type = "ip"
+  target_type = "instance" # Changed to instance for EC2 Bridge networking
 
   health_check {
     path = "/health"
@@ -89,53 +180,33 @@ resource "aws_lb_listener" "front_end" {
   }
 }
 
-# === ECS ===
+# === ECS Service ===
 
-resource "aws_ecs_cluster" "main" {
-  name = "${var.project_name}-cluster"
-
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
-  }
-}
-
-resource "aws_ecs_cluster_capacity_providers" "main" {
-  cluster_name = aws_ecs_cluster.main.name
-  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
-
-  default_capacity_provider_strategy {
-    base              = 1
-    weight            = 100
-    capacity_provider = "FARGATE_SPOT"
-  }
-}
-
-# IAM Roles (Simplified)
+# Task Execution Role
 data "aws_iam_role" "execution_role" {
-  name = "ecsTaskExecutionRole" # Assumes exists from default AWS setup or create new
+  name = "ecsTaskExecutionRole"
 }
-# Note: In a full prod setup, we'd define aws_iam_role here.
 
 resource "aws_ecs_task_definition" "api" {
   family                   = "${var.project_name}-api"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = 512
-  memory                   = 1024
+  network_mode             = "bridge" # Bridge for EC2
+  requires_compatibilities = ["EC2"]
+  cpu                      = 256
+  memory                   = 512
   execution_role_arn       = data.aws_iam_role.execution_role.arn
   
   container_definitions = jsonencode([
     {
       name      = "api-container"
       image     = aws_ecr_repository.api.repository_url
-      cpu       = 512
-      memory    = 1024
+      cpu       = 256
+      memory    = 512
       essential = true
       portMappings = [
         {
           containerPort = 8080
-          hostPort      = 8080
+          hostPort      = 0 # Dynamic host port mapping
+          protocol      = "tcp"
         }
       ]
     }
@@ -146,13 +217,8 @@ resource "aws_ecs_service" "api" {
   name            = "${var.project_name}-api-service"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.api.arn
-  desired_count   = 2
-
-  network_configuration {
-    subnets          = var.private_app_subnets
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = false
-  }
+  desired_count   = 1
+  launch_type     = "EC2"
 
   load_balancer {
     target_group_arn = aws_lb_target_group.api.arn
@@ -160,12 +226,9 @@ resource "aws_ecs_service" "api" {
     container_port   = 8080
   }
 
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE_SPOT"
-    weight            = 100
-  }
+  depends_on = [aws_lb_listener.front_end]
 }
 
 output "alb_dns_name" { value = aws_lb.main.dns_name }
 output "ecr_url" { value = aws_ecr_repository.api.repository_url }
-output "ecs_sg_id" { value = aws_security_group.ecs.id }
+output "ecs_sg_id" { value = aws_security_group.ecs_node.id }

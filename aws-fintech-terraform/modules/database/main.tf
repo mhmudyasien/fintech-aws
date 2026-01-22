@@ -3,13 +3,12 @@ variable "environment" {}
 variable "vpc_id" {}
 variable "private_data_subnets" { type = list(string) }
 variable "app_sg_id" {}
-variable "kms_key_id" {}
 
 # === Security Groups ===
 
 resource "aws_security_group" "db" {
   name        = "${var.project_name}-db-sg"
-  description = "Security Group for Aurora"
+  description = "Security Group for RDS"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -37,7 +36,8 @@ resource "aws_security_group" "redis" {
   tags = { Name = "${var.project_name}-redis-sg" }
 }
 
-# === Aurora PostgreSQL ===
+# === RDS PostgreSQL (Standard, not Aurora) ===
+# Aurora has no perpetual free tier. db.t3.micro Standard is free tier eligible.
 
 resource "aws_db_subnet_group" "main" {
   name       = "${var.project_name}-db-subnets"
@@ -52,7 +52,6 @@ resource "random_password" "db_pass" {
 
 resource "aws_secretsmanager_secret" "db_creds" {
   name       = "${var.project_name}/db-credentials"
-  kms_key_id = var.kms_key_id
   recovery_window_in_days = 0 
 }
 
@@ -67,57 +66,39 @@ resource "aws_secretsmanager_secret_version" "db_creds" {
   })
 }
 
-resource "aws_rds_cluster" "main" {
-  cluster_identifier      = "${var.project_name}-cluster"
-  engine                  = "aurora-postgresql"
-  engine_version          = "15.4"
-  master_username         = "fintechadmin"
-  master_password         = random_password.db_pass.result
-  database_name           = "fintech"
-  db_subnet_group_name    = aws_db_subnet_group.main.name
-  vpc_security_group_ids  = [aws_security_group.db.id]
-  storage_encrypted       = true
-  kms_key_id              = var.kms_key_id
-  skip_final_snapshot     = true # For demo/dev purposes
-  # deletion_protection     = true # Omitted for easy cleanup in demo
-  
-  serverlessv2_scaling_configuration {
-    max_capacity = 2.0
-    min_capacity = 0.5
-  }
+resource "aws_db_instance" "main" {
+  identifier             = "${var.project_name}-db"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 20
+  engine                 = "postgres"
+  engine_version         = "15.4" # Check allowed versions for Free Tier
+  username               = "fintechadmin"
+  password               = random_password.db_pass.result
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  db_name                = "fintech"
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+  multi_az               = false # Single AZ for free tier
 }
 
-resource "aws_rds_cluster_instance" "main" {
-  count              = 2
-  cluster_identifier = aws_rds_cluster.main.id
-  instance_class     = "db.serverless"
-  engine             = aws_rds_cluster.main.engine
-  engine_version     = aws_rds_cluster.main.engine_version
-}
-
-# === Redis ===
+# === Redis (Single Node) ===
 
 resource "aws_elasticache_subnet_group" "main" {
   name       = "${var.project_name}-redis-subnets"
   subnet_ids = var.private_data_subnets
 }
 
-# Removed transit_encryption/auth for simplicity/stability in demo Terraform, 
-# typically requires complex logic for auth token in TF providers.
-# Keeping it basic: Replication Group in VPC.
-
-resource "aws_elasticache_replication_group" "main" {
-  replication_group_id   = "${var.project_name}-redis"
-  description            = "Fintech Redis"
-  engine                 = "redis"
-  node_type              = "cache.t3.micro"
-  num_cache_clusters     = 2
-  parameter_group_name   = "default.redis7"
-  port                   = 6379
-  subnet_group_name      = aws_elasticache_subnet_group.main.name
-  security_group_ids     = [aws_security_group.redis.id]
-  automatic_failover_enabled = true
-  multi_az_enabled           = true
+resource "aws_elasticache_cluster" "main" {
+  cluster_id           = "${var.project_name}-redis"
+  engine               = "redis"
+  node_type            = "cache.t2.micro" # Free tier eligible
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  engine_version       = "7.0"
+  port                 = 6379
+  subnet_group_name    = aws_elasticache_subnet_group.main.name
+  security_group_ids   = [aws_security_group.redis.id]
 }
 
 # === DynamoDB ===
@@ -125,7 +106,7 @@ resource "aws_elasticache_replication_group" "main" {
 resource "aws_dynamodb_table" "sessions" {
   name         = "${var.project_name}-sessions"
   billing_mode = "PROVISIONED"
-  read_capacity  = 5
+  read_capacity  = 5 # Within 25 free units
   write_capacity = 5
   hash_key       = "userId"
   range_key      = "sessionId"
@@ -140,14 +121,7 @@ resource "aws_dynamodb_table" "sessions" {
     type = "S"
   }
 
-  server_side_encryption {
-    enabled     = true
-    kms_key_arn = var.kms_key_id
-  }
-
-  lifecycle {
-    ignore_changes = [read_capacity, write_capacity] # Ignore changes if AutoScaling modifies
-  }
+  # Removing KMS dependency to save $1
 }
 
-output "db_endpoint" { value = aws_rds_cluster.main.endpoint }
+output "db_endpoint" { value = aws_db_instance.main.endpoint }

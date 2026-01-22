@@ -1,50 +1,41 @@
-# AWS Fintech Project - Terraform Implementation
+# AWS Fintech Project - Terraform Implementation (Free Tier)
 
 ## Overview
-This directory contains the Terraform Infrastructure as Code (IaC) to deploy the Fintech project. It replaces the previous Bash scripts with a declarative, state-managed approach.
+This configuration is optimized for the **AWS Free Tier**. It deploys a functional Fintech infrastructure while minimizing costs by using eligible instance types and removing optional paid features.
+
+## Free Tier Optimizations
+- **Compute**: Uses EC2 `t2.micro` (750h free) instead of Fargate.
+- **Database**: Uses RDS `db.t3.micro` and Redis `cache.t2.micro`.
+- **Networking**: NAT Gateways removed (ECS runs in Public Subnets).
+- **Storage**: Standard S3 with managed encryption (no custom KMS cost).
 
 ## Structure
-
-- **main.tf**: Entry point, calls all modules.
-- **variables.tf**: Configuration (Region, CIDR).
-- **modules/**
-  - **networking**: VPC, Subnets, NAT, VPC Endpoints.
-  - **compute**: ECS Fargate, ALB, ECR.
-  - **database**: Aurora PostgreSQL, Redis, DynamoDB.
+- **main.tf**: Entry point.
+- **modules/**:
+  - **networking**: VPC, Public (App) & Private (Data) Subnets.
+  - **compute**: ECS Cluster with Auto Scaling Group (EC2 Launch Type).
+  - **database**: RDS PostgreSQL & Redis (Single Node).
   - **storage**: S3 Data Lake.
-
-## Prerequisites
-
-1.  **Terraform**: [Install Terraform](https://developer.hashicorp.com/terraform/downloads) (v1.0+).
-2.  **AWS CLI**: Configured with credentials (`aws configure`).
-3.  **Cleanup**: Ensure resources from previous bash scripts are DELETED to avoid conflicts.
 
 ## Deployment Steps
 
-1.  **Initialize**: Download providers and modules.
+1.  **Cleanup Old State** (Critical if retrying):
+    ```bash
+    rm terraform.tfstate*
+    rm -rf .terraform/
+    ```
+
+2.  **Initialize**:
     ```bash
     terraform init
     ```
 
-2.  **Plan**: Preview changes.
-    ```bash
-    terraform plan
-    ```
-
-3.  **Apply**: Create infrastructure.
+3.  **Apply**:
     ```bash
     terraform apply
-    # Type 'yes' to confirm
-    ```
-
-4.  **Destroy**: Teardown everything.
-    ```bash
-    terraform destroy
     ```
 
 ## Outputs
-After a successful apply, Terraform will output:
-- `alb_url`: Load Balancer DNS (Access your API here).
-- `ecr_repo`: Registry URL to push your Docker images.
-- `db_endpoint`: Database connection string.
-- `s3_bucket`: Logic bucket name.
+- `alb_url`: API Endpoint.
+- `ecr_repo`: Docker Registry.
+- `db_endpoint`: Database Host.
