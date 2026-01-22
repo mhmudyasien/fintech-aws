@@ -25,6 +25,29 @@ get_subnet_by_cidr() {
     aws ec2 describe-subnets --filters "Name=vpc-id,Values=$1" "Name=cidr-block,Values=$2" --query "Subnets[0].SubnetId" --output text | grep -v "None" || echo ""
 }
 
+# Smart Associate Subnet to Route Table
+associate_subnet() {
+    local subnet_id=$1
+    local rt_id=$2
+    
+    # Check current association
+    local current_assoc=$(aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$subnet_id" --query "RouteTables[0].Associations[?SubnetId=='$subnet_id'].RouteTableAssociationId" --output text | grep -v "None" || echo "")
+    
+    if [ -n "$current_assoc" ]; then
+        # Check if matched
+        local current_rt=$(aws ec2 describe-route-tables --filters "Name=association.route-table-association-id,Values=$current_assoc" --query "RouteTables[0].RouteTableId" --output text)
+        if [ "$current_rt" == "$rt_id" ]; then
+            echo "Subnet $subnet_id already associated with $rt_id."
+        else
+            echo "Updating association for subnet $subnet_id..."
+            aws ec2 replace-route-table-association --association-id $current_assoc --route-table-id $rt_id
+        fi
+    else
+        echo "Associating subnet $subnet_id to $rt_id..."
+        aws ec2 associate-route-table --subnet-id $subnet_id --route-table-id $rt_id
+    fi
+}
+
 # Special handler since 'describe-vpcs' uses 'Vpcs' not 'Vpcss'
 get_vpc_id() {
      aws ec2 describe-vpcs --filters "Name=tag:Name,Values=$1" --query "Vpcs[0].VpcId" --output text | grep -v "None" || echo ""
@@ -191,8 +214,8 @@ else
 fi
 
 # Associate Public Subnets
-aws ec2 associate-route-table --subnet-id $PUB_SUBNET_A --route-table-id $PUB_RT_ID || true
-aws ec2 associate-route-table --subnet-id $PUB_SUBNET_B --route-table-id $PUB_RT_ID || true
+associate_subnet $PUB_SUBNET_A $PUB_RT_ID
+associate_subnet $PUB_SUBNET_B $PUB_RT_ID
 
 PRIV_RT_NAME="${PROJECT}-private-rt"
 PRIV_RT_ID=$(aws ec2 describe-route-tables --filters "Name=tag:Name,Values=$PRIV_RT_NAME" --query "RouteTables[0].RouteTableId" --output text | grep -v "None" || echo "")
@@ -209,8 +232,8 @@ else
 fi
 
 # Associate Private Subnets
-aws ec2 associate-route-table --subnet-id $PRIV_SUBNET_A --route-table-id $PRIV_RT_ID || true
-aws ec2 associate-route-table --subnet-id $PRIV_SUBNET_B --route-table-id $PRIV_RT_ID || true
+associate_subnet $PRIV_SUBNET_A $PRIV_RT_ID
+associate_subnet $PRIV_SUBNET_B $PRIV_RT_ID
 
 # 6. Save State
 echo "Saving state to .env_state..."
