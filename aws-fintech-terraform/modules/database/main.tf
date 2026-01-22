@@ -71,7 +71,7 @@ resource "aws_secretsmanager_secret_version" "db_creds" {
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
   engine                 = "postgres"
-  engine_version         = "16.3" # Updated to supported version
+  engine_version         = "16.1" # Standard supported version
   username               = "fintechadmin"
   password               = random_password.db_pass.result
   db_subnet_group_name   = aws_db_subnet_group.main.name
