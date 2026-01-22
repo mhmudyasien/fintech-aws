@@ -101,7 +101,7 @@ resource "aws_iam_instance_profile" "ecs_instance_profile" {
 resource "aws_launch_template" "ecs" {
   name_prefix   = "${var.project_name}-ecs-lt"
   image_id      = data.aws_ssm_parameter.ecs_ami.value
-  instance_type = "t2.micro" # Free Tier
+  instance_type = "t3.micro" # Updated for Free Tier/Region availability
   
   iam_instance_profile {
     name = aws_iam_instance_profile.ecs_instance_profile.name

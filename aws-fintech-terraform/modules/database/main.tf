@@ -66,12 +66,12 @@ resource "aws_secretsmanager_secret_version" "db_creds" {
   })
 }
 
-resource "aws_db_instance" "main" {
+ resource "aws_db_instance" "main" {
   identifier             = "${var.project_name}-db"
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
   engine                 = "postgres"
-  engine_version         = "15.4" # Check allowed versions for Free Tier
+  engine_version         = "16.3" # Updated to supported version
   username               = "fintechadmin"
   password               = random_password.db_pass.result
   db_subnet_group_name   = aws_db_subnet_group.main.name
@@ -92,7 +92,7 @@ resource "aws_elasticache_subnet_group" "main" {
 resource "aws_elasticache_cluster" "main" {
   cluster_id           = "${var.project_name}-redis"
   engine               = "redis"
-  node_type            = "cache.t2.micro" # Free tier eligible
+  node_type            = "cache.t3.micro" # Updated for Redis 7 support
   num_cache_nodes      = 1
   parameter_group_name = "default.redis7"
   engine_version       = "7.0"
