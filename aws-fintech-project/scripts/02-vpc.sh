@@ -20,6 +20,11 @@ get_resource_id() {
         jq -r ".${resource_type^}s[0].${resource_type^}Id" | grep -v "null" || echo ""
 }
 
+# Check for existing subnet by CIDR to avoid overlaps
+get_subnet_by_cidr() {
+    aws ec2 describe-subnets --filters "Name=vpc-id,Values=$1" "Name=cidr-block,Values=$2" --query "Subnets[0].SubnetId" --output text | grep -v "None" || echo ""
+}
+
 # Special handler since 'describe-vpcs' uses 'Vpcs' not 'Vpcss'
 get_vpc_id() {
      aws ec2 describe-vpcs --filters "Name=tag:Name,Values=$1" --query "Vpcs[0].VpcId" --output text | grep -v "None" || echo ""
@@ -75,12 +80,19 @@ AZ_B=${AZS[1]}
 
 # Public A
 PUB_SUBNET_A_NAME="${PROJECT}-public-subnet-1a"
+PUB_SUBNET_A_CIDR="10.0.1.0/24"
 PUB_SUBNET_A=$(get_subnet_id $PUB_SUBNET_A_NAME)
 if [ -z "$PUB_SUBNET_A" ]; then
-    echo "Creating Public Subnet A..."
-    PUB_SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone $AZ_A \
-        --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PUB_SUBNET_A_NAME},{Key=Type,Value=Public}]" \
-        --query 'Subnet.SubnetId' --output text)
+    PUB_SUBNET_A=$(get_subnet_by_cidr $VPC_ID $PUB_SUBNET_A_CIDR)
+    if [ -n "$PUB_SUBNET_A" ]; then
+        echo "Adopting existing Public Subnet A (CIDR matches)..."
+        aws ec2 create-tags --resources $PUB_SUBNET_A --tags Key=Name,Value=$PUB_SUBNET_A_NAME Key=Type,Value=Public
+    else
+        echo "Creating Public Subnet A..."
+        PUB_SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block $PUB_SUBNET_A_CIDR --availability-zone $AZ_A \
+            --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PUB_SUBNET_A_NAME},{Key=Type,Value=Public}]" \
+            --query 'Subnet.SubnetId' --output text)
+    fi
     aws ec2 modify-subnet-attribute --subnet-id $PUB_SUBNET_A --map-public-ip-on-launch
 else
     echo "Public Subnet A exists: $PUB_SUBNET_A"
@@ -88,12 +100,19 @@ fi
 
 # Public B
 PUB_SUBNET_B_NAME="${PROJECT}-public-subnet-1b"
+PUB_SUBNET_B_CIDR="10.0.2.0/24"
 PUB_SUBNET_B=$(get_subnet_id $PUB_SUBNET_B_NAME)
 if [ -z "$PUB_SUBNET_B" ]; then
-    echo "Creating Public Subnet B..."
-    PUB_SUBNET_B=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone $AZ_B \
-        --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PUB_SUBNET_B_NAME},{Key=Type,Value=Public}]" \
-        --query 'Subnet.SubnetId' --output text)
+    PUB_SUBNET_B=$(get_subnet_by_cidr $VPC_ID $PUB_SUBNET_B_CIDR)
+    if [ -n "$PUB_SUBNET_B" ]; then
+        echo "Adopting existing Public Subnet B (CIDR matches)..."
+        aws ec2 create-tags --resources $PUB_SUBNET_B --tags Key=Name,Value=$PUB_SUBNET_B_NAME Key=Type,Value=Public
+    else
+        echo "Creating Public Subnet B..."
+        PUB_SUBNET_B=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block $PUB_SUBNET_B_CIDR --availability-zone $AZ_B \
+            --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PUB_SUBNET_B_NAME},{Key=Type,Value=Public}]" \
+            --query 'Subnet.SubnetId' --output text)
+    fi
     aws ec2 modify-subnet-attribute --subnet-id $PUB_SUBNET_B --map-public-ip-on-launch
 else
     echo "Public Subnet B exists: $PUB_SUBNET_B"
@@ -101,24 +120,38 @@ fi
 
 # Private App A
 PRIV_SUBNET_A_NAME="${PROJECT}-private-app-subnet-1a"
+PRIV_SUBNET_A_CIDR="10.0.10.0/24"
 PRIV_SUBNET_A=$(get_subnet_id $PRIV_SUBNET_A_NAME)
 if [ -z "$PRIV_SUBNET_A" ]; then
-    echo "Creating Private App Subnet A..."
-    PRIV_SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.10.0/24 --availability-zone $AZ_A \
-        --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PRIV_SUBNET_A_NAME},{Key=Type,Value=Private}]" \
-        --query 'Subnet.SubnetId' --output text)
+    PRIV_SUBNET_A=$(get_subnet_by_cidr $VPC_ID $PRIV_SUBNET_A_CIDR)
+    if [ -n "$PRIV_SUBNET_A" ]; then
+        echo "Adopting existing Private Subnet A (CIDR matches)..."
+        aws ec2 create-tags --resources $PRIV_SUBNET_A --tags Key=Name,Value=$PRIV_SUBNET_A_NAME Key=Type,Value=Private
+    else
+        echo "Creating Private App Subnet A..."
+        PRIV_SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block $PRIV_SUBNET_A_CIDR --availability-zone $AZ_A \
+            --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PRIV_SUBNET_A_NAME},{Key=Type,Value=Private}]" \
+            --query 'Subnet.SubnetId' --output text)
+    fi
 else
     echo "Private App Subnet A exists: $PRIV_SUBNET_A"
 fi
 
 # Private App B
 PRIV_SUBNET_B_NAME="${PROJECT}-private-app-subnet-1b"
+PRIV_SUBNET_B_CIDR="10.0.11.0/24"
 PRIV_SUBNET_B=$(get_subnet_id $PRIV_SUBNET_B_NAME)
 if [ -z "$PRIV_SUBNET_B" ]; then
-    echo "Creating Private App Subnet B..."
-    PRIV_SUBNET_B=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.11.0/24 --availability-zone $AZ_B \
-        --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PRIV_SUBNET_B_NAME},{Key=Type,Value=Private}]" \
-        --query 'Subnet.SubnetId' --output text)
+    PRIV_SUBNET_B=$(get_subnet_by_cidr $VPC_ID $PRIV_SUBNET_B_CIDR)
+    if [ -n "$PRIV_SUBNET_B" ]; then
+        echo "Adopting existing Private Subnet B (CIDR matches)..."
+        aws ec2 create-tags --resources $PRIV_SUBNET_B --tags Key=Name,Value=$PRIV_SUBNET_B_NAME Key=Type,Value=Private
+    else
+        echo "Creating Private App Subnet B..."
+        PRIV_SUBNET_B=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block $PRIV_SUBNET_B_CIDR --availability-zone $AZ_B \
+            --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=$PRIV_SUBNET_B_NAME},{Key=Type,Value=Private}]" \
+            --query 'Subnet.SubnetId' --output text)
+    fi
 else
     echo "Private App Subnet B exists: $PRIV_SUBNET_B"
 fi
