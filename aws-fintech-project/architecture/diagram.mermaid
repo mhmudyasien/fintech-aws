@@ -1,0 +1,42 @@
+graph TB
+    subgraph "AWS Cloud (us-east-1)"
+        IGW[Internet Gateway]
+        
+        subgraph "VPC (10.0.0.0/16)"
+            subgraph "Public Subnets (10.0.1.0/24, 10.0.2.0/24)"
+                NAT[NAT Gateway]
+                ALB[Application Load Balancer]
+            end
+            
+            subgraph "Private App Subnets (10.0.11.0/24, 10.0.12.0/24)"
+                ECS[ECS Fargate Cluster]
+                API[API Service]
+                VPCE[VPC Endpoints]
+            end
+            
+            subgraph "Data Subnets (10.0.21.0/24, 10.0.22.0/24)"
+                Aurora[Aurora PostgreSQL]
+                Redis[ElastiCache Redis]
+            end
+        end
+        
+        S3[S3 Data Lake]
+        DDB[DynamoDB Sessions]
+        CW[CloudWatch]
+        SM[Secrets Manager]
+        ECR[ECR Repository]
+        
+        IGW --> ALB
+        ALB --> API
+        API --> Aurora
+        API --> Redis
+        API --> DDB
+        API --> S3
+        
+        API -.-> VPCE
+        VPCE -.-> ECR
+        VPCE -.-> SM
+        VPCE -.-> S3
+        
+        ECS --> CW
+    end
